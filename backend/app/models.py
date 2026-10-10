@@ -20,16 +20,23 @@ class ItemIn(BaseModel):
     allow_rotate: bool = Field(
         True, description="Allow 90° yaw (swap length/width) on XY plane"
     )
+    # Max weight that may rest on top of this carton (kg). None = default 5x own weight.
+    max_stack_load_kg: Optional[float] = Field(
+        None, ge=0, description="承重上限：上方允许堆放的总重量 kg"
+    )
+    stackable: bool = Field(True, description="是否允许被压在下面承重")
 
 
 class ContainerIn(BaseModel):
-    """Container / cabinet inner dimensions (mm) and optional max weight (kg)."""
+    """Max enclosure / container inner dims (mm); packer minimizes tight outer box inside this."""
 
     name: str = "20GP"
     length: float = Field(5898, gt=0)
     width: float = Field(2352, gt=0)
     height: float = Field(2393, gt=0)
     max_weight: Optional[float] = Field(28200, description="kg, optional")
+    # Soft CG band as fraction of L/W from geometric center (0.15 = ±15%).
+    cog_band: float = Field(0.15, ge=0.05, le=0.5)
 
 
 class PackRequest(BaseModel):
@@ -48,6 +55,8 @@ class PlacementOut(BaseModel):
     height: float
     weight: float
     rotated: bool = False
+    unload_order: int = 0  # 1 = first off (near door)
+    load_order: int = 0  # 1 = first on (far from door)
 
 
 class PackStats(BaseModel):
@@ -59,6 +68,16 @@ class PackStats(BaseModel):
     weight_used_kg: float
     weight_limit_kg: Optional[float] = None
     weight_utilization: Optional[float] = None
+    pack_length_mm: float = 0
+    pack_width_mm: float = 0
+    pack_height_mm: float = 0
+    pack_surface_m2: float = 0
+    container_volume_m3: Optional[float] = None
+    cog_x_mm: float = 0
+    cog_y_mm: float = 0
+    cog_z_mm: float = 0
+    cog_ok: bool = True
+    door_axis: str = "x+"  # unload toward +length (container door)
 
 
 class PackResponse(BaseModel):

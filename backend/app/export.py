@@ -28,7 +28,9 @@ DETAIL_HEADERS: List[str] = [
     "放置Y(mm)",
     "放置Z(mm)",
     "旋转",
-    "柜体积利用率%",
+    "卸载顺序",
+    "装载顺序",
+    "装箱紧密度%",
     "总重量(kg)",
     "状态",
 ]
@@ -67,6 +69,8 @@ def detail_rows(req: PackRequest, result: PackResponse) -> List[list]:
                 placed.y,
                 placed.z,
                 "90°" if placed.rotated else "0°",
+                placed.unload_order,
+                placed.load_order,
                 util,
                 total_weight,
                 "已装入",
@@ -90,6 +94,8 @@ def detail_rows(req: PackRequest, result: PackResponse) -> List[list]:
                 None,
                 None,
                 None,
+                None,
+                None,
                 util,
                 total_weight,
                 "未装入",
@@ -106,6 +112,12 @@ def summary_pairs(req: PackRequest, result: PackResponse) -> List[tuple]:
         if stats.weight_utilization is not None
         else None
     )
+    pack_size = (
+        f"{stats.pack_length_mm:g}×{stats.pack_width_mm:g}×{stats.pack_height_mm:g}"
+        if stats.pack_length_mm
+        else None
+    )
+    cog = f"{stats.cog_x_mm:g},{stats.cog_y_mm:g},{stats.cog_z_mm:g}"
     return [
         ("柜型", container.name),
         (
@@ -113,9 +125,13 @@ def summary_pairs(req: PackRequest, result: PackResponse) -> List[tuple]:
             f"{container.length:g}×{container.width:g}×{container.height:g}",
         ),
         ("限重(kg)", container.max_weight),
-        ("体积利用率%", round(stats.volume_utilization * 100, 2)),
+        ("外包装尺寸(mm)", pack_size),
+        ("外包装表面积(m²)", stats.pack_surface_m2),
+        ("装箱紧密度%", round(stats.volume_utilization * 100, 2)),
         ("重量利用率%", weight_util),
         ("总重量(kg)", stats.weight_used_kg),
+        ("重心(mm)", cog),
+        ("重心是否在带内", "是" if stats.cog_ok else "否"),
         ("已装入件数", stats.placed_count),
         ("未装入件数", stats.unplaced_count),
     ]

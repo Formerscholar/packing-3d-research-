@@ -1,7 +1,8 @@
 import { Canvas } from "@react-three/fiber";
 import { Edges, OrbitControls, PerspectiveCamera } from "@react-three/drei";
-import { useCallback, useMemo, useState } from "react";
-import { downloadPackingList, fetchSample, pack } from "./api";
+import { useCallback, useMemo, useRef, useState } from "react";
+import type { ThreeEvent } from "@react-three/fiber";
+import { downloadPackingList, fetchSample, importItems, pack } from "./api";
 import type { ContainerIn, ItemIn, PackRequest, PackResponse, PlacementOut } from "./types";
 
 /** mm → scene units (meters-ish, scaled down for camera comfort) */
@@ -45,25 +46,85 @@ function ContainerWire({
   );
 }
 
-function BoxMesh({ p }: { p: PlacementOut }) {
+function BoxMesh({
+  p,
+  selected,
+  onSelect,
+  onDragEnd,
+}: {
+  p: PlacementOut;
+  selected: boolean;
+  onSelect: (id: string) => void;
+  onDragEnd: (id: string, x: number, y: number, z: number) => void;
+}) {
   const L = p.length * SCALE;
   const W = p.width * SCALE;
   const H = p.height * SCALE;
-  // API: x along length, y along width, z along height
-  // Three.js: x, y(up), z
+  const dragging = useRef(false);
+  const planeY = useRef(p.z * SCALE);
   const cx = (p.x + p.length / 2) * SCALE;
   const cy = (p.z + p.height / 2) * SCALE;
   const cz = (p.y + p.width / 2) * SCALE;
+
+  const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation();
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    dragging.current = true;
+    planeY.current = p.z * SCALE;
+    onSelect(p.id);
+  };
+  const onPointerUp = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation();
+    if (!dragging.current) return;
+    dragging.current = false;
+    const hit = e.point;
+    // Three: x,y(up),z  -> API x,z(height),y(width)
+    const nx = Math.max(0, hit.x / SCALE - p.length / 2);
+    const ny = Math.max(0, hit.z / SCALE - p.width / 2);
+    const nz = Math.max(0, planeY.current / SCALE);
+    onDragEnd(p.id, nx, ny, nz);
+  };
+
   return (
-    <mesh position={[cx, cy, cz]}>
+    <mesh
+      position={[cx, cy, cz]}
+      onPointerDown={onPointerDown}
+      onPointerUp={onPointerUp}
+      onPointerMissed={() => undefined}
+    >
       <boxGeometry args={[L, H, W]} />
-      <meshStandardMaterial color={colorFor(p.id)} metalness={0.1} roughness={0.55} />
-      <Edges threshold={15} color="#0f172a" />
+      <meshStandardMaterial
+        color={selected ? "#f8fafc" : colorFor(p.id)}
+        metalness={0.1}
+        roughness={0.55}
+        emissive={selected ? "#38bdf8" : "#000000"}
+        emissiveIntensity={selected ? 0.35 : 0}
+      />
+      <Edges threshold={15} color={selected ? "#38bdf8" : "#0f172a"} />
     </mesh>
   );
 }
 
-function Scene({ result }: { result: PackResponse | null }) {
+function CogMarker({ x, y, z }: { x: number; y: number; z: number }) {
+  return (
+    <mesh position={[x * SCALE, z * SCALE, y * SCALE]}>
+      <sphereGeometry args={[0.08, 16, 16]} />
+      <meshStandardMaterial color="#f43f5e" emissive="#f43f5e" emissiveIntensity={0.5} />
+    </mesh>
+  );
+}
+
+function Scene({
+  result,
+  selectedId,
+  onSelect,
+  onDragEnd,
+}: {
+  result: PackResponse | null;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onDragEnd: (id: string, x: number, y: number, z: number) => void;
+}) {
   const c = result?.container;
   const lookAt = useMemo(() => {
     if (!c) return [2.5, 1, 1] as [number, number, number];
@@ -84,8 +145,21 @@ function Scene({ result }: { result: PackResponse | null }) {
       <gridHelper args={[12, 24, "#334155", "#1e293b"]} position={[0, 0, 0]} />
       {c && <ContainerWire length={c.length} width={c.width} height={c.height} />}
       {result?.placements.map((p) => (
-        <BoxMesh key={p.id} p={p} />
+        <BoxMesh
+          key={p.id}
+          p={p}
+          selected={selectedId === p.id}
+          onSelect={onSelect}
+          onDragEnd={onDragEnd}
+        />
       ))}
+      {result?.stats?.cog_x_mm != null && (
+        <CogMarker
+          x={result.stats.cog_x_mm}
+          y={result.stats.cog_y_mm ?? 0}
+          z={result.stats.cog_z_mm ?? 0}
+        />
+      )}
     </Canvas>
   );
 }
@@ -107,8 +181,9 @@ const PRESET_20GP_ITEMS: ItemIn[] = [
     width: 400,
     height: 400,
     weight: 12,
-    qty: 20,
+    qty: 24,
     allow_rotate: true,
+    max_stack_load_kg: 60,
   },
   {
     id: "SKU-B",
@@ -117,8 +192,9 @@ const PRESET_20GP_ITEMS: ItemIn[] = [
     width: 600,
     height: 500,
     weight: 25,
-    qty: 8,
+    qty: 12,
     allow_rotate: true,
+    max_stack_load_kg: 80,
   },
   {
     id: "SKU-C",
@@ -127,8 +203,9 @@ const PRESET_20GP_ITEMS: ItemIn[] = [
     width: 300,
     height: 300,
     weight: 8,
-    qty: 15,
+    qty: 30,
     allow_rotate: true,
+    max_stack_load_kg: 40,
   },
 ];
 
@@ -142,6 +219,8 @@ function blankItem(n: number): ItemIn {
     weight: 5,
     qty: 1,
     allow_rotate: true,
+    max_stack_load_kg: 25,
+    stackable: true,
   };
 }
 
@@ -172,6 +251,7 @@ export default function App() {
   const [result, setResult] = useState<PackResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const requestBody = useCallback((): PackRequest => {
@@ -186,6 +266,8 @@ export default function App() {
         id: it.id.trim(),
         name: it.name?.trim() || it.id.trim(),
         allow_rotate: it.allow_rotate !== false,
+        max_stack_load_kg: it.max_stack_load_kg ?? null,
+        stackable: it.stackable !== false,
       })),
     };
   }, [container, items]);
@@ -259,8 +341,66 @@ export default function App() {
     setDirty(true);
   };
 
+
+  const onDragEnd = useCallback((id: string, x: number, y: number, z: number) => {
+    setResult((prev) => {
+      if (!prev) return prev;
+      const placements = prev.placements.map((p) =>
+        p.id === id ? { ...p, x, y, z } : p
+      );
+      // naive overlap reject
+      const me = placements.find((p) => p.id === id)!;
+      const overlap = placements.some((o) => {
+        if (o.id === id) return false;
+        return !(
+          me.x + me.length <= o.x ||
+          o.x + o.length <= me.x ||
+          me.y + me.width <= o.y ||
+          o.y + o.width <= me.y ||
+          me.z + me.height <= o.z ||
+          o.z + o.height <= me.z
+        );
+      });
+      if (overlap) return prev;
+      const c = prev.container;
+      if (
+        me.x < 0 ||
+        me.y < 0 ||
+        me.z < 0 ||
+        me.x + me.length > c.length ||
+        me.y + me.width > c.width ||
+        me.z + me.height > c.height
+      ) {
+        return prev;
+      }
+      return { ...prev, placements };
+    });
+    setDirty(true);
+  }, []);
+
+  const onImportExcel = useCallback(async (file: File) => {
+    setError(null);
+    setLoading(true);
+    try {
+      const data = await importItems(file);
+      setItems(data.items);
+      setDirty(true);
+      setResult(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   const stats = result?.stats;
   const utilPct = stats ? (stats.volume_utilization * 100).toFixed(1) : null;
+  const packSize =
+    stats?.pack_length_mm != null
+      ? `${Math.round(stats.pack_length_mm)} × ${Math.round(stats.pack_width_mm ?? 0)} × ${Math.round(stats.pack_height_mm ?? 0)} mm`
+      : null;
+  const packSurf =
+    stats?.pack_surface_m2 != null ? stats.pack_surface_m2.toFixed(3) : null;
   const weightPct =
     stats?.weight_utilization != null
       ? (stats.weight_utilization * 100).toFixed(1)
@@ -270,7 +410,7 @@ export default function App() {
     <div className="app">
       <aside className="panel">
         <h1>装箱 3D · MVP</h1>
-        <p className="sub">Layer A：编辑 SKU → 排箱 → 看利用率 → 下载装箱单</p>
+        <p className="sub">Layer A：编辑 SKU → 紧凑排箱 · 承重/重心/LIFO · 可拖拽→ 下载装箱单</p>
 
         <section className="block">
           <div className="block-head">
@@ -375,12 +515,30 @@ export default function App() {
         {stats && (
           <div className="metrics">
             <div className="metric">
-              <span>体积利用率</span>
+              <span>外包装尺寸</span>
+              <strong>{packSize ?? "—"}</strong>
+            </div>
+            <div className="metric">
+              <span>外包装表面积</span>
+              <strong>{packSurf != null ? `${packSurf} m²` : "—"}</strong>
+            </div>
+            <div className="metric">
+              <span>装箱紧密度</span>
               <strong>{utilPct}%</strong>
               <small>
                 {stats.volume_used_m3} / {stats.volume_total_m3} m³
               </small>
             </div>
+            <div className="metric">
+              <span>重心</span>
+              <strong>
+                {stats.cog_x_mm != null
+                  ? `${Math.round(stats.cog_x_mm)}, ${Math.round(stats.cog_y_mm ?? 0)}, ${Math.round(stats.cog_z_mm ?? 0)}`
+                  : "—"}
+              </strong>
+              <small>{stats.cog_ok === false ? "偏心，建议调整" : "在允许带内"}</small>
+            </div>
+
             <div className="metric">
               <span>总重量</span>
               <strong>{stats.weight_used_kg} kg</strong>
@@ -404,17 +562,33 @@ export default function App() {
         <section className="block">
           <div className="block-head">
             <h2>SKU</h2>
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => {
-                setItems((prev) => [...prev, blankItem(prev.length + 1)]);
-                setDirty(true);
-              }}
-              disabled={loading}
-            >
-              添加一行
-            </button>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  setItems((prev) => [...prev, blankItem(prev.length + 1)]);
+                  setDirty(true);
+                }}
+                disabled={loading}
+              >
+                添加一行
+              </button>
+              <label className="ghost" style={{ cursor: "pointer", padding: "4px 8px" }}>
+                导入 Excel
+                <input
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  style={{ display: "none" }}
+                  disabled={loading}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) void onImportExcel(f);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+            </div>
           </div>
           <div className="list">
             <table className="sku-edit">
@@ -427,6 +601,7 @@ export default function App() {
                   <th>高</th>
                   <th>kg</th>
                   <th>数量</th>
+                  <th>承重kg</th>
                   <th>旋转</th>
                   <th></th>
                 </tr>
@@ -485,7 +660,36 @@ export default function App() {
                         onChange={(e) => patchItem(index, { weight: Number(e.target.value) })}
                       />
                     </td>
+                                          <td>
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={it.max_stack_load_kg ?? ""}
+                          onChange={(e) =>
+                            patchItem(index, {
+                              max_stack_load_kg:
+                                e.target.value === "" ? null : Number(e.target.value),
+                            })
+                          }
+                        />
+                      </td>
                     <td>
+                      <input
+                        aria-label={`承重 ${index + 1}`}
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={it.max_stack_load_kg ?? ""}
+                        onChange={(e) =>
+                          patchItem(index, {
+                            max_stack_load_kg:
+                              e.target.value === "" ? null : Number(e.target.value),
+                          })
+                        }
+                      />
+                    </td>
+<td>
                       <input
                         aria-label={`数量 ${index + 1}`}
                         type="number"
@@ -527,7 +731,7 @@ export default function App() {
 
       <main className="viewport">
         <div className="hint">拖拽旋转 · 滚轮缩放 · 单位 mm→m 显示</div>
-        <Scene result={result} />
+        <Scene result={result} selectedId={selectedId} onSelect={setSelectedId} onDragEnd={onDragEnd} />
       </main>
     </div>
   );

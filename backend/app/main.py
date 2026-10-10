@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
+from typing import List
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from .engine import pack
 from .export import to_csv, to_xlsx
+from .import_sku import parse_sku_workbook
 from .models import ContainerIn, ItemIn, PackRequest, PackResponse
 
 app = FastAPI(
     title="Packing 3D Research API",
-    description="MVP Container Loading packer (Extreme-Point / FFD)",
-    version="0.1.0",
+    description="Compact packer with load-bearing, COG, LIFO",
+    version="0.2.0",
 )
 
 app.add_middleware(
@@ -27,9 +29,36 @@ app.add_middleware(
 )
 
 SAMPLE_ITEMS = [
-    ItemIn(id="SKU-A", name="纸箱A 600x400x400", length=600, width=400, height=400, weight=12, qty=20),
-    ItemIn(id="SKU-B", name="纸箱B 800x600x500", length=800, width=600, height=500, weight=25, qty=8),
-    ItemIn(id="SKU-C", name="纸箱C 400x300x300", length=400, width=300, height=300, weight=8, qty=15),
+    ItemIn(
+        id="SKU-A",
+        name="纸箱A 600x400x400",
+        length=600,
+        width=400,
+        height=400,
+        weight=12,
+        qty=24,
+        max_stack_load_kg=60,
+    ),
+    ItemIn(
+        id="SKU-B",
+        name="纸箱B 800x600x500",
+        length=800,
+        width=600,
+        height=500,
+        weight=25,
+        qty=12,
+        max_stack_load_kg=80,
+    ),
+    ItemIn(
+        id="SKU-C",
+        name="纸箱C 400x300x300",
+        length=400,
+        width=300,
+        height=300,
+        weight=8,
+        qty=30,
+        max_stack_load_kg=40,
+    ),
 ]
 
 
@@ -40,13 +69,30 @@ def health():
 
 @app.get("/api/sample")
 def sample() -> PackRequest:
-    """Return a demo request: mixed SKUs into a 20GP."""
     return PackRequest(container=ContainerIn(), items=SAMPLE_ITEMS)
 
 
 @app.post("/api/pack", response_model=PackResponse)
 def pack_endpoint(req: PackRequest) -> PackResponse:
     return pack(req.container, req.items)
+
+
+@app.post("/api/items/import")
+async def import_items(file: UploadFile = File(...)) -> dict:
+    """Parse an Excel/CSV SKU list into ItemIn rows."""
+    name = (file.filename or "").lower()
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty file")
+    try:
+        items: List[ItemIn] = parse_sku_workbook(raw, name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"parse failed: {e}") from e
+    if not items:
+        raise HTTPException(status_code=400, detail="no SKU rows found")
+    return {"items": [it.model_dump() for it in items], "count": len(items)}
 
 
 def _attachment(name: str, ext: str) -> dict[str, str]:
@@ -65,7 +111,6 @@ def export_pack(
     req: PackRequest,
     format: str = Query("xlsx", description="xlsx or csv"),
 ) -> Response:
-    """Pack, then return a packing list. Same body as POST /api/pack."""
     fmt = format.lower()
     result = pack(req.container, req.items)
     if fmt == "xlsx":

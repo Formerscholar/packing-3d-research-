@@ -50,3 +50,14 @@ export async function downloadPackingList(
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+export async function importItems(file: File): Promise<{ items: import("./types").ItemIn[]; count: number }> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await fetch(`${BASE}/api/items/import`, { method: "POST", body: fd });
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(`import failed: ${r.status} ${t}`);
+  }
+  return r.json();
+}
