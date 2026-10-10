@@ -1,4 +1,4 @@
-"""Turn a pack result into a packing list (xlsx or csv).
+"""Turn a pack result into a packing list (xlsx, csv, or pdf).
 
 Does not reimplement placement. Rows are built from PackResponse plus the
 original SKU lines so unplaced pieces still have name and dimensions.
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import io
+from pathlib import Path
 from typing import Dict, List, Sequence
 
 from openpyxl import Workbook
@@ -232,3 +233,59 @@ def to_xlsx(req: PackRequest, result: PackResponse) -> bytes:
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
+
+
+def _cjk_font() -> str:
+    for candidate in (
+        Path(r"C:\Windows\Fonts\simhei.ttf"),
+        Path(r"C:\Windows\Fonts\msyh.ttf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    raise FileNotFoundError("找不到中文字体，无法导出 PDF")
+
+
+def _pdf_widths(total: float) -> List[float]:
+    weights = [
+        1.5, 1.7, 0.7, 0.9, 0.9, 0.9, 1.0, 1.0, 1.0, 1.0, 0.7, 0.95, 0.95, 1.15, 1.05, 0.9,
+    ]
+    scale = total / sum(weights)
+    return [weight * scale for weight in weights]
+
+
+def to_pdf(req: PackRequest, result: PackResponse) -> bytes:
+    from fpdf import FPDF
+
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=10)
+    pdf.add_font("hei", fname=_cjk_font())
+    pdf.add_page()
+    pdf.set_font("hei", size=12)
+    pdf.cell(0, 8, f"装箱单 · {req.container.name}", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("hei", size=8)
+    for key, value in summary_pairs(req, result):
+        shown = "" if value is None else str(value)
+        pdf.cell(0, 5, f"{key}：{shown}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+    pdf.set_font("hei", size=7)
+    usable = pdf.w - pdf.l_margin - pdf.r_margin
+    widths = _pdf_widths(usable)
+
+    def draw_header() -> None:
+        pdf.set_font("hei", size=7)
+        for header, width in zip(DETAIL_HEADERS, widths):
+            pdf.cell(width, 6, header, border=1)
+        pdf.ln()
+
+    draw_header()
+    for row in detail_rows(req, result):
+        if pdf.get_y() > pdf.h - 16:
+            pdf.add_page()
+            draw_header()
+        for value, width in zip(row, widths):
+            text = "" if value is None else str(value)
+            pdf.cell(width, 5, text, border=1)
+        pdf.ln()
+    return bytes(pdf.output())

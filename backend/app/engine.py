@@ -7,7 +7,7 @@ hard upper bound. Stacking checks support area and crush capacity.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .models import (
     ContainerIn,
@@ -29,6 +29,7 @@ class _Box:
     allow_rotate: bool
     max_stack_load_kg: float
     stackable: bool
+    unload_seq: Optional[int] = None
 
 
 @dataclass
@@ -131,32 +132,40 @@ def _support_ok(
     return all(p.box.stackable for p, _ in supporters)
 
 
-def _load_bearing_ok(
+class LayoutError(ValueError):
+    """Manual layout failed a physical or LIFO check."""
+
+
+def _y_overlap(y: float, w: float, oy: float, ow: float) -> bool:
+    return y + w > oy + 1e-6 and oy + ow > y + 1e-6
+
+
+def _lifo_pose_ok(
     x: float,
     y: float,
-    z: float,
     l: float,
     w: float,
-    weight: float,
+    seq: Optional[int],
     placed: Sequence[_Placed],
 ) -> bool:
-    """Distribute new weight across supporters by overlap area; check capacity."""
-    if z <= 1e-6:
+    """Earlier unload (smaller seq) must sit entirely toward the door (+X) in the same lane."""
+    if seq is None:
         return True
-    supporters = _supporters(x, y, z, l, w, placed)
-    if not supporters:
-        return False
-    total_area = sum(a for _, a in supporters)
-    if total_area <= 0:
-        return False
-    for p, area in supporters:
-        share = weight * (area / total_area)
-        if p.load_on_top + share > p.box.max_stack_load_kg + 1e-6:
+    for p in placed:
+        other = p.box.unload_seq
+        if other is None or other == seq:
+            continue
+        if not _y_overlap(y, w, p.y, p.w):
+            continue
+        if seq < other:
+            if x < p.x + p.l - 1e-6:
+                return False
+        elif x + l > p.x + 1e-6:
             return False
     return True
 
 
-def _apply_load(
+def _push_load(
     x: float,
     y: float,
     z: float,
@@ -164,15 +173,47 @@ def _apply_load(
     w: float,
     weight: float,
     placed: Sequence[_Placed],
-) -> None:
-    if z <= 1e-6:
-        return
+    mutate: bool,
+) -> Optional[str]:
+    """Push weight onto direct supporters and down the stack. None means the chain holds."""
+    if weight <= 0 or z <= 1e-6:
+        return None
     supporters = _supporters(x, y, z, l, w, placed)
-    total_area = sum(a for _, a in supporters)
+    if not supporters:
+        return "悬空或支撑不足"
+    total_area = sum(area for _, area in supporters)
     if total_area <= 0:
-        return
-    for p, area in supporters:
-        p.load_on_top += weight * (area / total_area)
+        return "悬空或支撑不足"
+    pending: List[Tuple[_Placed, float]] = [
+        (box, weight * (area / total_area)) for box, area in supporters
+    ]
+    extras: Dict[int, float] = {}
+    steps = 0
+    while pending:
+        steps += 1
+        if steps > 10000:
+            return "承重计算超过层数上限"
+        box, share = pending.pop()
+        key = id(box)
+        extras[key] = extras.get(key, 0.0) + share
+        if not box.box.stackable:
+            return "下方箱子不可承重"
+        if box.load_on_top + extras[key] > box.box.max_stack_load_kg + 1e-6:
+            return "承重超限"
+        subs = _supporters(box.x, box.y, box.z, box.l, box.w, placed)
+        if not subs:
+            continue
+        sub_area = sum(area for _, area in subs)
+        if sub_area <= 0:
+            continue
+        for lower, area in subs:
+            pending.append((lower, share * (area / sub_area)))
+    if mutate:
+        for box in placed:
+            extra = extras.get(id(box))
+            if extra:
+                box.load_on_top += extra
+    return None
 
 
 def _surface(L: float, W: float, H: float) -> float:
@@ -244,12 +285,19 @@ def pack(container: ContainerIn, items: Sequence[ItemIn]) -> PackResponse:
                     allow_rotate=it.allow_rotate,
                     max_stack_load_kg=crush,
                     stackable=it.stackable,
+                    unload_seq=it.unload_seq,
                 )
             )
 
-    # Heavier / larger first; fragile (low crush) slightly later among equals
+    # Later-unload (deeper) first, then larger / heavier cartons.
     boxes.sort(
-        key=lambda b: (b.l * b.w * b.h, b.weight, b.max_stack_load_kg),
+        key=lambda b: (
+            b.unload_seq is not None,
+            b.unload_seq or 0,
+            b.l * b.w * b.h,
+            b.weight,
+            b.max_stack_load_kg,
+        ),
         reverse=True,
     )
 
@@ -275,7 +323,9 @@ def pack(container: ContainerIn, items: Sequence[ItemIn]) -> PackResponse:
                     continue
                 if not _support_ok(px, py, pz, l, w, placed):
                     continue
-                if not _load_bearing_ok(px, py, pz, l, w, box.weight, placed):
+                if _push_load(px, py, pz, l, w, box.weight, placed, mutate=False):
+                    continue
+                if not _lifo_pose_ok(px, py, l, w, box.unload_seq, placed):
                     continue
                 nl = max(bx_l, px + l)
                 nw = max(bx_w, py + w)
@@ -293,7 +343,7 @@ def pack(container: ContainerIn, items: Sequence[ItemIn]) -> PackResponse:
             continue
 
         x, y, z, l, w, h, rot = best_pose
-        _apply_load(x, y, z, l, w, box.weight, placed)
+        _push_load(x, y, z, l, w, box.weight, placed, mutate=True)
         placed.append(
             _Placed(box=box, x=x, y=y, z=z, l=l, w=w, h=h, rotated=rot)
         )
@@ -319,6 +369,15 @@ def pack(container: ContainerIn, items: Sequence[ItemIn]) -> PackResponse:
         )
         eps[:] = _prune_eps(eps, placed)
 
+    return _finalize(container, placed, unplaced, weight_used)
+
+
+def _finalize(
+    container: ContainerIn,
+    placed: Sequence[_Placed],
+    unplaced: Sequence[str],
+    weight_used: float,
+) -> PackResponse:
     # --- COG ---
     if placed and weight_used > 0:
         cog_x = sum((p.x + p.l / 2) * p.box.weight for p in placed) / weight_used
@@ -350,8 +409,9 @@ def pack(container: ContainerIn, items: Sequence[ItemIn]) -> PackResponse:
     vol_used = sum(p.l * p.w * p.h for p in placed) / 1e9
     pack_vol = (pack_l * pack_w * pack_h) / 1e9 if placed else 0.0
     util = (vol_used / pack_vol) if pack_vol > 0 else 0.0
-    cont_vol = (cl * cw * ch) / 1e9
+    cont_vol = (container.length * container.width * container.height) / 1e9
     surf_m2 = _surface(pack_l, pack_w, pack_h) / 1e6 if placed else 0.0
+    max_w = container.max_weight
     w_util = (weight_used / max_w) if max_w and max_w > 0 else None
 
     placements = [
@@ -397,3 +457,101 @@ def pack(container: ContainerIn, items: Sequence[ItemIn]) -> PackResponse:
             door_axis="x+",
         ),
     )
+
+
+def _item_for_piece(piece_id: str, items: Sequence[ItemIn]) -> Optional[ItemIn]:
+    by_id = {item.id: item for item in items}
+    if piece_id in by_id:
+        return by_id[piece_id]
+    base, sep, suffix = piece_id.rpartition("#")
+    if sep and suffix.isdigit() and base in by_id:
+        return by_id[base]
+    return None
+
+
+def _piece_ids(items: Sequence[ItemIn]) -> List[str]:
+    ids: List[str] = []
+    for item in items:
+        for index in range(item.qty):
+            ids.append(f"{item.id}#{index + 1}" if item.qty > 1 else item.id)
+    return ids
+
+
+def evaluate_layout(
+    container: ContainerIn,
+    items: Sequence[ItemIn],
+    poses: Sequence[PlacementOut],
+) -> PackResponse:
+    """Validate a hand-placed layout and recompute load, COG, utilization, and order."""
+    if len({pose.id for pose in poses}) != len(list(poses)):
+        raise LayoutError("箱子 id 重复")
+
+    placed: List[_Placed] = []
+    for pose in poses:
+        src = _item_for_piece(pose.id, items)
+        if (
+            pose.x < -1e-6
+            or pose.y < -1e-6
+            or pose.z < -1e-6
+            or pose.x + pose.length > container.length + 1e-6
+            or pose.y + pose.width > container.width + 1e-6
+            or pose.z + pose.height > container.height + 1e-6
+        ):
+            raise LayoutError("超出柜体")
+        placed.append(
+            _Placed(
+                box=_Box(
+                    id=pose.id,
+                    name=pose.name or (src.name if src and src.name else pose.id),
+                    l=pose.length,
+                    w=pose.width,
+                    h=pose.height,
+                    weight=pose.weight,
+                    allow_rotate=src.allow_rotate if src else True,
+                    max_stack_load_kg=_default_crush(
+                        pose.weight, src.max_stack_load_kg if src else None
+                    ),
+                    stackable=src.stackable if src else True,
+                    unload_seq=src.unload_seq if src else None,
+                ),
+                x=pose.x,
+                y=pose.y,
+                z=pose.z,
+                l=pose.length,
+                w=pose.width,
+                h=pose.height,
+                rotated=pose.rotated,
+            )
+        )
+
+    for index, box in enumerate(placed):
+        for other in placed[index + 1 :]:
+            if _aabb_overlap(
+                (box.x, box.y, box.z, box.l, box.w, box.h),
+                (other.x, other.y, other.z, other.l, other.w, other.h),
+            ):
+                raise LayoutError("与其他箱子重叠")
+
+    weight_used = sum(box.box.weight for box in placed)
+    if container.max_weight is not None and weight_used > container.max_weight + 1e-6:
+        raise LayoutError("超过限重")
+
+    for box in sorted(placed, key=lambda item: (item.z, item.y, item.x)):
+        if not _support_ok(box.x, box.y, box.z, box.l, box.w, placed):
+            raise LayoutError("悬空或支撑不足")
+        issue = _push_load(
+            box.x, box.y, box.z, box.l, box.w, box.box.weight, placed, mutate=False
+        )
+        if issue:
+            raise LayoutError(issue)
+        _push_load(box.x, box.y, box.z, box.l, box.w, box.box.weight, placed, mutate=True)
+
+    for box in placed:
+        others = [other for other in placed if other is not box]
+        if not _lifo_pose_ok(box.x, box.y, box.l, box.w, box.box.unload_seq, others):
+            raise LayoutError("装卸顺序冲突：先卸的货被挡在远离柜门的一侧")
+
+    expected = _piece_ids(items)
+    placed_ids = {box.box.id for box in placed}
+    unplaced = [piece_id for piece_id in expected if piece_id not in placed_ids]
+    return _finalize(container, placed, unplaced, weight_used)

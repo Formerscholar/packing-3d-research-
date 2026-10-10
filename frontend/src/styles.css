@@ -37,7 +37,7 @@ body,
 }
 .actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 8px;
 }
 .actions button:first-child {
@@ -153,7 +153,7 @@ input {
 .sku-edit {
   width: 100%;
   border-collapse: collapse;
-  min-width: 640px;
+  min-width: 820px;
 }
 .sku-edit th,
 .sku-edit td {
@@ -194,11 +194,30 @@ input {
   top: 12px;
   left: 12px;
   z-index: 2;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: min(560px, calc(100% - 24px));
   background: rgba(15, 20, 25, 0.75);
   padding: 8px 12px;
   border-radius: 8px;
   font-size: 0.85rem;
   color: #8b9bb4;
+}
+.viewport .hint button {
+  width: auto;
+  padding: 4px 10px;
+  border: none;
+  border-radius: 6px;
+  background: #3b82f6;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+.viewport .hint button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .error {
   color: #f87171;

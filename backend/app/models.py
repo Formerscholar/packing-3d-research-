@@ -25,6 +25,11 @@ class ItemIn(BaseModel):
         None, ge=0, description="承重上限：上方允许堆放的总重量 kg"
     )
     stackable: bool = Field(True, description="是否允许被压在下面承重")
+    unload_seq: Optional[int] = Field(
+        None,
+        ge=1,
+        description="卸货次序，1 最先卸，应靠近柜门（长度正方向）",
+    )
 
 
 class ContainerIn(BaseModel):
@@ -37,11 +42,6 @@ class ContainerIn(BaseModel):
     max_weight: Optional[float] = Field(28200, description="kg, optional")
     # Soft CG band as fraction of L/W from geometric center (0.15 = ±15%).
     cog_band: float = Field(0.15, ge=0.05, le=0.5)
-
-
-class PackRequest(BaseModel):
-    container: ContainerIn = Field(default_factory=ContainerIn)
-    items: List[ItemIn]
 
 
 class PlacementOut(BaseModel):
@@ -57,6 +57,13 @@ class PlacementOut(BaseModel):
     rotated: bool = False
     unload_order: int = 0  # 1 = first off (near door)
     load_order: int = 0  # 1 = first on (far from door)
+
+
+class PackRequest(BaseModel):
+    container: ContainerIn = Field(default_factory=ContainerIn)
+    items: List[ItemIn]
+    # When set, export/layout keeps these poses instead of running a new search.
+    placements: Optional[List[PlacementOut]] = None
 
 
 class PackStats(BaseModel):

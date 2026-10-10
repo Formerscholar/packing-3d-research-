@@ -1,8 +1,11 @@
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { Edges, OrbitControls, PerspectiveCamera } from "@react-three/drei";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { MutableRefObject } from "react";
 import type { ThreeEvent } from "@react-three/fiber";
-import { downloadPackingList, fetchSample, importItems, pack } from "./api";
+import * as THREE from "three";
+import { downloadPackingList, fetchSample, importItems, pack, submitLayout } from "./api";
+import { dropZ, separateOnFloor, snapXY, sourceItem } from "./placement";
 import type { ContainerIn, ItemIn, PackRequest, PackResponse, PlacementOut } from "./types";
 
 /** mm → scene units (meters-ish, scaled down for camera comfort) */
@@ -49,48 +52,30 @@ function ContainerWire({
 function BoxMesh({
   p,
   selected,
-  onSelect,
-  onDragEnd,
+  onPointerDown,
 }: {
   p: PlacementOut;
   selected: boolean;
-  onSelect: (id: string) => void;
-  onDragEnd: (id: string, x: number, y: number, z: number) => void;
+  onPointerDown: (event: ThreeEvent<PointerEvent>, placement: PlacementOut) => void;
 }) {
   const L = p.length * SCALE;
   const W = p.width * SCALE;
   const H = p.height * SCALE;
-  const dragging = useRef(false);
-  const planeY = useRef(p.z * SCALE);
   const cx = (p.x + p.length / 2) * SCALE;
   const cy = (p.z + p.height / 2) * SCALE;
   const cz = (p.y + p.width / 2) * SCALE;
 
-  const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
-    e.stopPropagation();
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-    dragging.current = true;
-    planeY.current = p.z * SCALE;
-    onSelect(p.id);
-  };
-  const onPointerUp = (e: ThreeEvent<PointerEvent>) => {
-    e.stopPropagation();
-    if (!dragging.current) return;
-    dragging.current = false;
-    const hit = e.point;
-    // Three: x,y(up),z  -> API x,z(height),y(width)
-    const nx = Math.max(0, hit.x / SCALE - p.length / 2);
-    const ny = Math.max(0, hit.z / SCALE - p.width / 2);
-    const nz = Math.max(0, planeY.current / SCALE);
-    onDragEnd(p.id, nx, ny, nz);
-  };
-
   return (
     <mesh
       position={[cx, cy, cz]}
-      onPointerDown={onPointerDown}
-      onPointerUp={onPointerUp}
-      onPointerMissed={() => undefined}
+      onPointerDown={(event) => onPointerDown(event, p)}
+      onPointerOver={(event) => {
+        event.stopPropagation();
+        document.body.style.cursor = "grab";
+      }}
+      onPointerOut={() => {
+        if (document.body.style.cursor === "grab") document.body.style.cursor = "";
+      }}
     >
       <boxGeometry args={[L, H, W]} />
       <meshStandardMaterial
@@ -114,18 +99,145 @@ function CogMarker({ x, y, z }: { x: number; y: number; z: number }) {
   );
 }
 
+type DragSession = {
+  id: string;
+  originX: number;
+  originY: number;
+  grabApiX: number;
+  grabApiY: number;
+  planeY: number;
+  snapshot: PlacementOut[];
+  moved: boolean;
+};
+
+function clientToApi(
+  clientX: number,
+  clientY: number,
+  planeY: number,
+  gl: THREE.WebGLRenderer,
+  camera: THREE.Camera
+): { apiX: number; apiY: number } | null {
+  const rect = gl.domElement.getBoundingClientRect();
+  const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+  const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+  const direction = raycaster.ray.direction;
+  if (Math.abs(direction.y) < 1e-6) return null;
+  const distance = (planeY - raycaster.ray.origin.y) / direction.y;
+  if (distance < 0) return null;
+  return {
+    apiX: (raycaster.ray.origin.x + direction.x * distance) / SCALE,
+    apiY: (raycaster.ray.origin.z + direction.z * distance) / SCALE,
+  };
+}
+
+function PointerDrag({
+  session,
+  containerRef,
+  onPreview,
+  onEnd,
+}: {
+  session: MutableRefObject<DragSession | null>;
+  containerRef: MutableRefObject<ContainerIn | null>;
+  onPreview: (next: PlacementOut[]) => void;
+  onEnd: (finished: DragSession) => void;
+}) {
+  const { gl, camera } = useThree();
+  const previewRef = useRef(onPreview);
+  const endRef = useRef(onEnd);
+  previewRef.current = onPreview;
+  endRef.current = onEnd;
+
+  useEffect(() => {
+    const element = gl.domElement;
+    const onMove = (event: PointerEvent) => {
+      const current = session.current;
+      const container = containerRef.current;
+      if (!current || !container || event.buttons !== 1) return;
+      const hit = clientToApi(event.clientX, event.clientY, current.planeY, gl, camera);
+      if (!hit) return;
+      const me = current.snapshot.find((item) => item.id === current.id);
+      if (!me) return;
+      const rawX = Math.max(
+        0,
+        Math.min(current.originX + (hit.apiX - current.grabApiX), container.length - me.length)
+      );
+      const rawY = Math.max(
+        0,
+        Math.min(current.originY + (hit.apiY - current.grabApiY), container.width - me.width)
+      );
+      const others = current.snapshot.filter((item) => item.id !== current.id);
+      const snapped = snapXY(rawX, rawY, me.length, me.width, others, container);
+      const z = dropZ(
+        snapped.x,
+        snapped.y,
+        me.length,
+        me.width,
+        me.height,
+        others,
+        container.height
+      );
+      if (z == null) return;
+      if (
+        Math.abs(snapped.x - current.originX) > 2 ||
+        Math.abs(snapped.y - current.originY) > 2 ||
+        Math.abs(z - me.z) > 2
+      ) {
+        current.moved = true;
+      }
+      previewRef.current(
+        current.snapshot.map((item) =>
+          item.id === current.id ? { ...me, x: snapped.x, y: snapped.y, z } : item
+        )
+      );
+    };
+    const onUp = () => {
+      const current = session.current;
+      if (!current) return;
+      session.current = null;
+      document.body.style.cursor = "";
+      endRef.current(current);
+    };
+    element.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      element.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [camera, containerRef, gl, session]);
+
+  return null;
+}
+
 function Scene({
   result,
   selectedId,
+  dragEnabled,
   onSelect,
-  onDragEnd,
+  onCommit,
 }: {
   result: PackResponse | null;
   selectedId: string | null;
+  dragEnabled: boolean;
   onSelect: (id: string) => void;
-  onDragEnd: (id: string, x: number, y: number, z: number) => void;
+  onCommit: (placements: PlacementOut[]) => Promise<string | null>;
 }) {
+  const controls = useRef<{ enabled: boolean } | null>(null);
+  const session = useRef<DragSession | null>(null);
+  const [live, setLive] = useState<PlacementOut[] | null>(null);
+  const [orbitOn, setOrbitOn] = useState(true);
+  const liveRef = useRef<PlacementOut[] | null>(null);
+  const containerRef = useRef<ContainerIn | null>(result?.container ?? null);
+  containerRef.current = result?.container ?? null;
   const c = result?.container;
+  const placements = live ?? result?.placements ?? [];
+
+  useEffect(() => {
+    setLive(null);
+    liveRef.current = null;
+  }, [result]);
+
   const lookAt = useMemo(() => {
     if (!c) return [2.5, 1, 1] as [number, number, number];
     return [(c.length * SCALE) / 2, (c.height * SCALE) / 2, (c.width * SCALE) / 2] as [
@@ -135,22 +247,68 @@ function Scene({
     ];
   }, [c]);
 
+  const beginDrag = (event: ThreeEvent<PointerEvent>, placement: PlacementOut) => {
+    event.stopPropagation();
+    event.nativeEvent.stopPropagation();
+    onSelect(placement.id);
+    if (!dragEnabled || !result) return;
+    if (controls.current) controls.current.enabled = false;
+    setOrbitOn(false);
+    document.body.style.cursor = "grabbing";
+    session.current = {
+      id: placement.id,
+      originX: placement.x,
+      originY: placement.y,
+      grabApiX: event.point.x / SCALE,
+      grabApiY: event.point.z / SCALE,
+      planeY: event.point.y,
+      snapshot: (live ?? result.placements).map((item) => ({ ...item })),
+      moved: false,
+    };
+  };
+
+  const finishDrag = (finished: DragSession) => {
+    setOrbitOn(true);
+    if (controls.current) controls.current.enabled = true;
+    if (!finished.moved) {
+      setLive(null);
+      liveRef.current = null;
+      return;
+    }
+    const next = liveRef.current;
+    if (!next) return;
+    void onCommit(next).then((err) => {
+      if (err) {
+        setLive(null);
+        liveRef.current = null;
+      }
+    });
+  };
+
   return (
-    <Canvas shadows>
+    <Canvas shadows role="application" aria-label="三维预览">
       <color attach="background" args={["#0f1419"]} />
       <ambientLight intensity={0.55} />
       <directionalLight position={[8, 12, 6]} intensity={1.1} />
       <PerspectiveCamera makeDefault position={[9, 5, 7]} fov={45} />
-      <OrbitControls target={lookAt} makeDefault />
+      <OrbitControls ref={controls as never} target={lookAt} makeDefault enabled={orbitOn} />
+      <PointerDrag
+        session={session}
+        containerRef={containerRef}
+        onPreview={(next) => {
+          liveRef.current = next;
+          setLive(next);
+        }}
+        onEnd={finishDrag}
+      />
       <gridHelper args={[12, 24, "#334155", "#1e293b"]} position={[0, 0, 0]} />
       {c && <ContainerWire length={c.length} width={c.width} height={c.height} />}
-      {result?.placements.map((p) => (
+      {placements.map((p) => (
         <BoxMesh
           key={p.id}
           p={p}
           selected={selectedId === p.id}
-          onSelect={onSelect}
-          onDragEnd={onDragEnd}
+          onPointerDown={beginDrag}
         />
       ))}
       {result?.stats?.cog_x_mm != null && (
@@ -251,8 +409,14 @@ export default function App() {
   const [result, setResult] = useState<PackResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [manualLayout, setManualLayout] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const markEdited = () => {
+    setDirty(true);
+    setManualLayout(false);
+  };
 
   const requestBody = useCallback((): PackRequest => {
     return {
@@ -268,6 +432,7 @@ export default function App() {
         allow_rotate: it.allow_rotate !== false,
         max_stack_load_kg: it.max_stack_load_kg ?? null,
         stackable: it.stackable !== false,
+        unload_seq: it.unload_seq ?? null,
       })),
     };
   }, [container, items]);
@@ -284,6 +449,8 @@ export default function App() {
     try {
       const res = await pack(body);
       setResult(res);
+      setSelectedId(res.placements[0]?.id ?? null);
+      setManualLayout(false);
       setDirty(false);
       if (req) {
         setContainer(req.container);
@@ -304,18 +471,22 @@ export default function App() {
       setContainer(sample.container);
       setItems(sample.items);
       setDirty(true);
+      setManualLayout(false);
       setResult(null);
+      setSelectedId(null);
     } catch {
       setContainer(PRESET_20GP);
       setItems(PRESET_20GP_ITEMS);
       setDirty(true);
+      setManualLayout(false);
       setResult(null);
+      setSelectedId(null);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  const exportList = useCallback(async (format: "xlsx" | "csv") => {
+  const exportList = useCallback(async (format: "xlsx" | "csv" | "pdf") => {
     const body = requestBody();
     const problem = validate(body.items, body.container);
     if (problem) {
@@ -325,58 +496,129 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
-      const res = await pack(body);
-      setResult(res);
-      setDirty(false);
-      await downloadPackingList(body, format);
+      if (manualLayout && result && !dirty) {
+        await downloadPackingList({ ...body, placements: result.placements }, format);
+      } else {
+        const res = await pack(body);
+        setResult(res);
+        setSelectedId(res.placements[0]?.id ?? null);
+        setManualLayout(false);
+        setDirty(false);
+        await downloadPackingList(body, format);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [requestBody]);
+  }, [dirty, manualLayout, requestBody, result]);
 
   const patchItem = (index: number, patch: Partial<ItemIn>) => {
     setItems((prev) => prev.map((it, i) => (i === index ? { ...it, ...patch } : it)));
-    setDirty(true);
+    markEdited();
   };
 
+  const commitLayout = useCallback(async (placements: PlacementOut[]): Promise<string | null> => {
+    const body = requestBody();
+    const problem = validate(body.items, body.container);
+    if (problem) {
+      setError(problem);
+      return problem;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await submitLayout({ ...body, placements });
+      setResult(res);
+      setManualLayout(true);
+      setDirty(false);
+      return null;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      return message;
+    } finally {
+      setLoading(false);
+    }
+  }, [requestBody]);
 
-  const onDragEnd = useCallback((id: string, x: number, y: number, z: number) => {
-    setResult((prev) => {
-      if (!prev) return prev;
-      const placements = prev.placements.map((p) =>
-        p.id === id ? { ...p, x, y, z } : p
-      );
-      // naive overlap reject
-      const me = placements.find((p) => p.id === id)!;
-      const overlap = placements.some((o) => {
-        if (o.id === id) return false;
-        return !(
-          me.x + me.length <= o.x ||
-          o.x + o.length <= me.x ||
-          me.y + me.width <= o.y ||
-          o.y + o.width <= me.y ||
-          me.z + me.height <= o.z ||
-          o.z + o.height <= me.z
-        );
-      });
-      if (overlap) return prev;
-      const c = prev.container;
-      if (
-        me.x < 0 ||
-        me.y < 0 ||
-        me.z < 0 ||
-        me.x + me.length > c.length ||
-        me.y + me.width > c.width ||
-        me.z + me.height > c.height
-      ) {
-        return prev;
-      }
-      return { ...prev, placements };
-    });
-    setDirty(true);
-  }, []);
+  const rotateSelected = useCallback(async () => {
+    if (!result || !selectedId) {
+      setError("先点选一个箱子");
+      return;
+    }
+    if (dirty) {
+      setError("表格已改，请先重新排箱再旋转");
+      return;
+    }
+    const body = requestBody();
+    const target = result.placements.find((item) => item.id === selectedId);
+    if (!target) return;
+    const src = sourceItem(target.id, body.items);
+    if (src && src.allow_rotate === false) {
+      setError("该 SKU 不允许旋转");
+      return;
+    }
+    const others = result.placements.filter((item) => item.id !== target.id);
+    const swapped: PlacementOut = {
+      ...target,
+      length: target.width,
+      width: target.length,
+      rotated: !target.rotated,
+    };
+    const snapped = snapXY(
+      swapped.x,
+      swapped.y,
+      swapped.length,
+      swapped.width,
+      others,
+      result.container
+    );
+    const separated =
+      separateOnFloor(
+        snapped.x,
+        snapped.y,
+        swapped.length,
+        swapped.width,
+        swapped.height,
+        others,
+        result.container
+      ) ?? {
+        x: Math.max(0, Math.min(snapped.x, result.container.length - swapped.length)),
+        y: Math.max(0, Math.min(snapped.y, result.container.width - swapped.width)),
+      };
+    const pose: PlacementOut = {
+      ...swapped,
+      x: separated.x,
+      y: separated.y,
+    };
+    const z = dropZ(
+      pose.x,
+      pose.y,
+      pose.length,
+      pose.width,
+      pose.height,
+      others,
+      result.container.height
+    );
+    if (z == null) {
+      setError("旋转后放不进柜子");
+      return;
+    }
+    await commitLayout(result.placements.map((item) => (item.id === target.id ? { ...pose, z } : item)));
+  }, [commitLayout, dirty, requestBody, result, selectedId]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "r" && event.key !== "R") return;
+      const tag = (event.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      event.preventDefault();
+      void rotateSelected();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [rotateSelected]);
 
   const onImportExcel = useCallback(async (file: File) => {
     setError(null);
@@ -385,7 +627,9 @@ export default function App() {
       const data = await importItems(file);
       setItems(data.items);
       setDirty(true);
+      setManualLayout(false);
       setResult(null);
+      setSelectedId(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -410,7 +654,7 @@ export default function App() {
     <div className="app">
       <aside className="panel">
         <h1>装箱 3D · MVP</h1>
-        <p className="sub">Layer A：编辑 SKU → 紧凑排箱 · 承重/重心/LIFO · 可拖拽→ 下载装箱单</p>
+        <p className="sub">按住箱子拖动，松手后重算重心和紧密度。R 或「旋转 90°」只吸附到正交朝向。</p>
 
         <section className="block">
           <div className="block-head">
@@ -426,7 +670,7 @@ export default function App() {
                 value={container.name}
                 onChange={(e) => {
                   setContainer({ ...container, name: e.target.value });
-                  setDirty(true);
+                  markEdited();
                 }}
               />
             </label>
@@ -438,7 +682,7 @@ export default function App() {
                 value={container.length}
                 onChange={(e) => {
                   setContainer({ ...container, length: Number(e.target.value) });
-                  setDirty(true);
+                  markEdited();
                 }}
               />
             </label>
@@ -450,7 +694,7 @@ export default function App() {
                 value={container.width}
                 onChange={(e) => {
                   setContainer({ ...container, width: Number(e.target.value) });
-                  setDirty(true);
+                  markEdited();
                 }}
               />
             </label>
@@ -462,7 +706,7 @@ export default function App() {
                 value={container.height}
                 onChange={(e) => {
                   setContainer({ ...container, height: Number(e.target.value) });
-                  setDirty(true);
+                  markEdited();
                 }}
               />
             </label>
@@ -478,7 +722,7 @@ export default function App() {
                     ...container,
                     max_weight: raw === "" ? null : Number(raw),
                   });
-                  setDirty(true);
+                  markEdited();
                 }}
               />
             </label>
@@ -505,11 +749,19 @@ export default function App() {
           >
             下载 CSV
           </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => exportList("pdf")}
+            disabled={loading}
+          >
+            下载 PDF
+          </button>
         </div>
 
         {error && <div className="error">{error}</div>}
         {dirty && result && (
-          <div className="note">表格已修改，指标和 3D 仍是上一次排箱结果。</div>
+          <div className="note">表格已修改，指标和 3D 仍是上一次排箱结果。请先重新排箱再拖动。</div>
         )}
 
         {stats && (
@@ -568,7 +820,7 @@ export default function App() {
                 className="ghost"
                 onClick={() => {
                   setItems((prev) => [...prev, blankItem(prev.length + 1)]);
-                  setDirty(true);
+                  markEdited();
                 }}
                 disabled={loading}
               >
@@ -602,6 +854,7 @@ export default function App() {
                   <th>kg</th>
                   <th>数量</th>
                   <th>承重kg</th>
+                  <th>卸序</th>
                   <th>旋转</th>
                   <th></th>
                 </tr>
@@ -660,20 +913,16 @@ export default function App() {
                         onChange={(e) => patchItem(index, { weight: Number(e.target.value) })}
                       />
                     </td>
-                                          <td>
-                        <input
-                          type="number"
-                          min={0}
-                          step={1}
-                          value={it.max_stack_load_kg ?? ""}
-                          onChange={(e) =>
-                            patchItem(index, {
-                              max_stack_load_kg:
-                                e.target.value === "" ? null : Number(e.target.value),
-                            })
-                          }
-                        />
-                      </td>
+                    <td>
+                      <input
+                        aria-label={`数量 ${index + 1}`}
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={it.qty}
+                        onChange={(e) => patchItem(index, { qty: Number(e.target.value) })}
+                      />
+                    </td>
                     <td>
                       <input
                         aria-label={`承重 ${index + 1}`}
@@ -689,14 +938,18 @@ export default function App() {
                         }
                       />
                     </td>
-<td>
+                    <td>
                       <input
-                        aria-label={`数量 ${index + 1}`}
+                        aria-label={`卸序 ${index + 1}`}
                         type="number"
                         min={1}
                         step={1}
-                        value={it.qty}
-                        onChange={(e) => patchItem(index, { qty: Number(e.target.value) })}
+                        value={it.unload_seq ?? ""}
+                        onChange={(e) =>
+                          patchItem(index, {
+                            unload_seq: e.target.value === "" ? null : Number(e.target.value),
+                          })
+                        }
                       />
                     </td>
                     <td className="center">
@@ -714,7 +967,7 @@ export default function App() {
                         aria-label={`删除 ${it.id || index + 1}`}
                         onClick={() => {
                           setItems((prev) => prev.filter((_, i) => i !== index));
-                          setDirty(true);
+                          markEdited();
                         }}
                       >
                         删除
@@ -725,13 +978,33 @@ export default function App() {
               </tbody>
             </table>
           </div>
-          <p className="unit-hint">尺寸单位 mm。旋转指水平面 90° 对调长宽。</p>
+          <p className="unit-hint">尺寸单位 mm。旋转指水平面 90°。卸序越小越先卸，并靠近柜门。</p>
         </section>
       </aside>
 
       <main className="viewport">
-        <div className="hint">拖拽旋转 · 滚轮缩放 · 单位 mm→m 显示</div>
-        <Scene result={result} selectedId={selectedId} onSelect={setSelectedId} onDragEnd={onDragEnd} />
+        <div className="hint">
+          按住箱子拖动，靠近箱边或柜壁会吸附。松手后重算重心和紧密度。滚轮缩放视角。
+          {selectedId && result?.placements.find((item) => item.id === selectedId) && (
+            <span>
+              选中 {selectedId} @{" "}
+              {Math.round(result.placements.find((item) => item.id === selectedId)!.x)},{" "}
+              {Math.round(result.placements.find((item) => item.id === selectedId)!.y)},{" "}
+              {Math.round(result.placements.find((item) => item.id === selectedId)!.z)}
+              {result.placements.find((item) => item.id === selectedId)!.rotated ? " · 90°" : " · 0°"}
+            </span>
+          )}
+          <button type="button" onClick={() => void rotateSelected()} disabled={!selectedId || loading || dirty}>
+            旋转 90°
+          </button>
+        </div>
+        <Scene
+          result={result}
+          selectedId={selectedId}
+          dragEnabled={!dirty && !loading}
+          onSelect={setSelectedId}
+          onCommit={commitLayout}
+        />
       </main>
     </div>
   );

@@ -53,7 +53,9 @@ DETAIL_HEADERS = [
     "放置Y(mm)",
     "放置Z(mm)",
     "旋转",
-    "柜体积利用率%",
+    "卸载顺序",
+    "装载顺序",
+    "装箱紧密度%",
     "总重量(kg)",
     "状态",
 ]
@@ -76,23 +78,23 @@ def test_export_xlsx_packing_list_fields():
     assert headers == DETAIL_HEADERS
 
     rows = list(ws.iter_rows(min_row=2, values_only=True))
-    placed = [r for r in rows if r[13] == "已装入"]
-    unplaced = [r for r in rows if r[13] == "未装入"]
+    placed = [r for r in rows if r[15] == "已装入"]
+    unplaced = [r for r in rows if r[15] == "未装入"]
     assert len(placed) == stats["placed_count"] == 2
     assert {r[0] for r in placed} == {"SKU-A"}
     assert all(r[1] == "纸箱A" and r[2] == 1 for r in placed)
     assert placed[0][7:10] == (0, 0, 0)
     assert placed[0][10] in ("0°", "90°")
-    assert placed[0][11] == round(stats["volume_utilization"] * 100, 2)
-    assert placed[0][12] == stats["weight_used_kg"]
+    assert placed[0][13] == round(stats["volume_utilization"] * 100, 2)
+    assert placed[0][14] == stats["weight_used_kg"]
     assert len(unplaced) == 1
     assert unplaced[0][0] == "HUGE"
     assert unplaced[0][7] is None
 
     summary = wb["装箱汇总"]
-    summary_map = {row[0].value: row[1].value for row in summary.iter_rows(max_row=8)}
+    summary_map = {row[0].value: row[1].value for row in summary.iter_rows(max_row=12)}
     assert summary_map["柜型"] == "20GP"
-    assert summary_map["体积利用率%"] == round(stats["volume_utilization"] * 100, 2)
+    assert summary_map["装箱紧密度%"] == round(stats["volume_utilization"] * 100, 2)
     assert summary_map["总重量(kg)"] == stats["weight_used_kg"]
     assert summary_map["未装入件数"] == stats["unplaced_count"]
 
@@ -108,8 +110,57 @@ def test_export_csv_has_same_columns():
     assert any("未装入" in line and "HUGE" in line for line in lines)
 
 
-def test_export_rejects_unknown_format():
+def test_export_pdf_and_manual_layout():
     res = client.post("/api/pack/export?format=pdf", json=BODY)
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/pdf")
+    assert res.content.startswith(b"%PDF")
+    assert "attachment" in res.headers.get("content-disposition", "")
+
+    manual = {
+        "container": {
+            "name": "20GP",
+            "length": 1000,
+            "width": 1000,
+            "height": 1000,
+            "max_weight": 1000,
+        },
+        "items": [
+            {
+                "id": "SKU-A",
+                "name": "纸箱A",
+                "length": 200,
+                "width": 100,
+                "height": 300,
+                "weight": 12.5,
+                "qty": 1,
+                "allow_rotate": False,
+            }
+        ],
+        "placements": [
+            {
+                "id": "SKU-A",
+                "name": "纸箱A",
+                "x": 80,
+                "y": 40,
+                "z": 0,
+                "length": 200,
+                "width": 100,
+                "height": 300,
+                "weight": 12.5,
+                "rotated": False,
+            }
+        ],
+    }
+    listed = client.post("/api/pack/export?format=xlsx", json=manual)
+    assert listed.status_code == 200
+    wb = load_workbook(BytesIO(listed.content))
+    rows = list(wb["装箱明细"].iter_rows(min_row=2, values_only=True))
+    assert rows[0][7:10] == (80, 40, 0)
+
+
+def test_export_rejects_unknown_format():
+    res = client.post("/api/pack/export?format=html", json=BODY)
     assert res.status_code == 400
 
 

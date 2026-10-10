@@ -1,4 +1,15 @@
-import type { PackRequest, PackResponse } from "./types";
+import type { PackRequest, PackResponse, PlacementOut } from "./types";
+
+async function errorDetail(response: Response, fallback: string): Promise<string> {
+  const text = await response.text();
+  try {
+    const body = JSON.parse(text) as { detail?: unknown };
+    if (typeof body.detail === "string" && body.detail) return body.detail;
+  } catch {
+    /* response was not JSON */
+  }
+  return text || fallback;
+}
 
 const BASE = import.meta.env.VITE_API_BASE ?? "";
 
@@ -21,9 +32,21 @@ export async function pack(req: PackRequest): Promise<PackResponse> {
   return r.json();
 }
 
+export async function submitLayout(
+  req: PackRequest & { placements: PlacementOut[] }
+): Promise<PackResponse> {
+  const r = await fetch(`${BASE}/api/pack/layout`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!r.ok) throw new Error(await errorDetail(r, `layout failed: ${r.status}`));
+  return r.json();
+}
+
 export async function downloadPackingList(
-  req: PackRequest,
-  format: "xlsx" | "csv" = "xlsx"
+  req: PackRequest & { placements?: PlacementOut[] },
+  format: "xlsx" | "csv" | "pdf" = "xlsx"
 ): Promise<void> {
   const r = await fetch(`${BASE}/api/pack/export?format=${format}`, {
     method: "POST",

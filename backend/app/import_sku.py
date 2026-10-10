@@ -45,6 +45,9 @@ ALIASES = {
     "承重上限": "max_stack_load_kg",
     "stackable": "stackable",
     "可承重": "stackable",
+    "unload_seq": "unload_seq",
+    "卸序": "unload_seq",
+    "卸载顺序": "unload_seq",
 }
 
 
@@ -89,6 +92,10 @@ def _row_to_item(cells: Dict[str, Any], row_no: int) -> Optional[ItemIn]:
     name_s = str(name).strip() if name not in (None, "") else None
     max_load = cells.get("max_stack_load_kg")
     max_load_f = float(max_load) if max_load not in (None, "") else None
+    seq_raw = cells.get("unload_seq")
+    seq_i = int(float(seq_raw)) if seq_raw not in (None, "") else None
+    if seq_i is not None and seq_i < 1:
+        seq_i = None
     return ItemIn(
         id=sku,
         name=name_s,
@@ -100,6 +107,7 @@ def _row_to_item(cells: Dict[str, Any], row_no: int) -> Optional[ItemIn]:
         allow_rotate=_truthy(cells.get("allow_rotate", True)),
         max_stack_load_kg=max_load_f,
         stackable=_truthy(cells.get("stackable", True)),
+        unload_seq=seq_i,
     )
 
 

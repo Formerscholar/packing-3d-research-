@@ -9,6 +9,7 @@ export interface ItemIn {
   allow_rotate?: boolean;
   max_stack_load_kg?: number | null;
   stackable?: boolean;
+  unload_seq?: number | null;
 }
 
 export interface ContainerIn {

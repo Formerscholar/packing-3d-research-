@@ -9,8 +9,8 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
-from .engine import pack
-from .export import to_csv, to_xlsx
+from .engine import LayoutError, evaluate_layout, pack
+from .export import to_csv, to_pdf, to_xlsx
 from .import_sku import parse_sku_workbook
 from .models import ContainerIn, ItemIn, PackRequest, PackResponse
 
@@ -72,9 +72,25 @@ def sample() -> PackRequest:
     return PackRequest(container=ContainerIn(), items=SAMPLE_ITEMS)
 
 
+def _solve(req: PackRequest) -> PackResponse:
+    if req.placements is not None:
+        try:
+            return evaluate_layout(req.container, req.items, req.placements)
+        except LayoutError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return pack(req.container, req.items)
+
+
 @app.post("/api/pack", response_model=PackResponse)
 def pack_endpoint(req: PackRequest) -> PackResponse:
     return pack(req.container, req.items)
+
+
+@app.post("/api/pack/layout", response_model=PackResponse)
+def layout_endpoint(req: PackRequest) -> PackResponse:
+    if req.placements is None:
+        raise HTTPException(status_code=400, detail="placements required")
+    return _solve(req)
 
 
 @app.post("/api/items/import")
@@ -109,10 +125,10 @@ def _attachment(name: str, ext: str) -> dict[str, str]:
 @app.post("/api/pack/export")
 def export_pack(
     req: PackRequest,
-    format: str = Query("xlsx", description="xlsx or csv"),
+    format: str = Query("xlsx", description="xlsx, csv, or pdf"),
 ) -> Response:
     fmt = format.lower()
-    result = pack(req.container, req.items)
+    result = _solve(req)
     if fmt == "xlsx":
         return Response(
             content=to_xlsx(req, result),
@@ -125,4 +141,14 @@ def export_pack(
             media_type="text/csv; charset=utf-8",
             headers=_attachment(req.container.name, "csv"),
         )
-    raise HTTPException(status_code=400, detail="format must be xlsx or csv")
+    if fmt == "pdf":
+        try:
+            payload = to_pdf(req, result)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return Response(
+            content=payload,
+            media_type="application/pdf",
+            headers=_attachment(req.container.name, "pdf"),
+        )
+    raise HTTPException(status_code=400, detail="format must be xlsx, csv, or pdf")
