@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+from urllib.parse import quote
+
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from .engine import pack
+from .export import to_csv, to_xlsx
 from .models import ContainerIn, ItemIn, PackRequest, PackResponse
 
 app = FastAPI(
@@ -43,3 +47,37 @@ def sample() -> PackRequest:
 @app.post("/api/pack", response_model=PackResponse)
 def pack_endpoint(req: PackRequest) -> PackResponse:
     return pack(req.container, req.items)
+
+
+def _attachment(name: str, ext: str) -> dict[str, str]:
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in name).strip("-")
+    ascii_name = f"packing-list-{safe}.{ext}" if safe else f"packing-list.{ext}"
+    utf_name = quote(f"装箱单-{name}.{ext}")
+    return {
+        "Content-Disposition": (
+            f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{utf_name}'
+        )
+    }
+
+
+@app.post("/api/pack/export")
+def export_pack(
+    req: PackRequest,
+    format: str = Query("xlsx", description="xlsx or csv"),
+) -> Response:
+    """Pack, then return a packing list. Same body as POST /api/pack."""
+    fmt = format.lower()
+    result = pack(req.container, req.items)
+    if fmt == "xlsx":
+        return Response(
+            content=to_xlsx(req, result),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=_attachment(req.container.name, "xlsx"),
+        )
+    if fmt == "csv":
+        return Response(
+            content=to_csv(req, result),
+            media_type="text/csv; charset=utf-8",
+            headers=_attachment(req.container.name, "csv"),
+        )
+    raise HTTPException(status_code=400, detail="format must be xlsx or csv")
