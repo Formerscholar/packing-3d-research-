@@ -410,9 +410,12 @@ def _finalize(
     pack_vol = (pack_l * pack_w * pack_h) / 1e9 if placed else 0.0
     util = (vol_used / pack_vol) if pack_vol > 0 else 0.0
     cont_vol = (container.length * container.width * container.height) / 1e9
+    container_util = (vol_used / cont_vol) if cont_vol > 0 else 0.0
+    remaining_volume = max(cont_vol - vol_used, 0.0)
     surf_m2 = _surface(pack_l, pack_w, pack_h) / 1e6 if placed else 0.0
     max_w = container.max_weight
     w_util = (weight_used / max_w) if max_w and max_w > 0 else None
+    remaining_weight = max(max_w - weight_used, 0.0) if max_w and max_w > 0 else None
 
     placements = [
         PlacementOut(
@@ -450,6 +453,10 @@ def _finalize(
             pack_height_mm=round(pack_h, 1),
             pack_surface_m2=round(surf_m2, 4),
             container_volume_m3=round(cont_vol, 4),
+            container_volume_utilization=round(container_util, 4),
+            container_weight_utilization=round(w_util, 4) if w_util is not None else None,
+            remaining_volume_m3=round(remaining_volume, 4),
+            remaining_weight_kg=round(remaining_weight, 2) if remaining_weight is not None else None,
             cog_x_mm=round(cog_x, 1),
             cog_y_mm=round(cog_y, 1),
             cog_z_mm=round(cog_z, 1),

@@ -50,6 +50,12 @@ export interface PackStats {
   pack_height_mm?: number;
   pack_surface_m2?: number;
   container_volume_m3?: number | null;
+  /** 已装体积 / 整柜内容积 */
+  container_volume_utilization?: number;
+  /** 已装重量 / 柜限重 */
+  container_weight_utilization?: number | null;
+  remaining_volume_m3?: number;
+  remaining_weight_kg?: number | null;
   cog_x_mm?: number;
   cog_y_mm?: number;
   cog_z_mm?: number;
@@ -67,4 +73,33 @@ export interface PackResponse {
   placements: PlacementOut[];
   unplaced: string[];
   stats: PackStats;
+}
+
+export type Bottleneck = "volume" | "height" | "weight";
+
+export interface CompareOption {
+  code: string;
+  length: number;
+  width: number;
+  height: number;
+  max_weight: number;
+  fits: boolean;
+  container_volume_utilization: number;
+  container_weight_utilization?: number | null;
+  remaining_volume_m3: number;
+  remaining_weight_kg?: number | null;
+  bottleneck?: Bottleneck | null;
+  bottleneck_label?: string | null;
+  detail?: string | null;
+  causes: string[];
+  short_volume_m3: number;
+  short_weight_kg: number;
+  short_height_mm: number;
+  placed_count: number;
+  unplaced_count: number;
+}
+
+export interface CompareResponse {
+  recommended: string | null;
+  options: CompareOption[];
 }

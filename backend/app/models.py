@@ -6,6 +6,10 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
+from .containers import CATALOG
+
+_GP20 = CATALOG["20GP"]
+
 
 class ItemIn(BaseModel):
     """One SKU / carton to pack (dimensions in mm, weight in kg)."""
@@ -35,13 +39,13 @@ class ItemIn(BaseModel):
 class ContainerIn(BaseModel):
     """Max enclosure / container inner dims (mm); packer minimizes tight outer box inside this."""
 
-    name: str = "20GP"
-    length: float = Field(5898, gt=0)
-    width: float = Field(2352, gt=0)
-    height: float = Field(2393, gt=0)
-    max_weight: Optional[float] = Field(28200, description="kg, optional")
+    name: str = _GP20.code
+    length: float = Field(_GP20.length, gt=0)
+    width: float = Field(_GP20.width, gt=0)
+    height: float = Field(_GP20.height, gt=0)
+    max_weight: Optional[float] = Field(_GP20.max_weight, description="kg, optional")
     # Soft CG band as fraction of L/W from geometric center (0.15 = ±15%).
-    cog_band: float = Field(0.15, ge=0.05, le=0.5)
+    cog_band: float = Field(_GP20.cog_band, ge=0.05, le=0.5)
 
 
 class PlacementOut(BaseModel):
@@ -80,6 +84,12 @@ class PackStats(BaseModel):
     pack_height_mm: float = 0
     pack_surface_m2: float = 0
     container_volume_m3: Optional[float] = None
+    # Placed cargo / full container inner volume. Primary FCL figure.
+    container_volume_utilization: float = 0
+    # Placed weight / container payload. Same ratio as weight_utilization.
+    container_weight_utilization: Optional[float] = None
+    remaining_volume_m3: float = 0
+    remaining_weight_kg: Optional[float] = None
     cog_x_mm: float = 0
     cog_y_mm: float = 0
     cog_z_mm: float = 0
@@ -92,3 +102,35 @@ class PackResponse(BaseModel):
     placements: List[PlacementOut]
     unplaced: List[str]
     stats: PackStats
+
+
+class CompareRequest(BaseModel):
+    items: List[ItemIn]
+    cog_band: float = Field(0.15, ge=0.05, le=0.5)
+
+
+class CompareOption(BaseModel):
+    code: str
+    length: float
+    width: float
+    height: float
+    max_weight: float
+    fits: bool
+    container_volume_utilization: float
+    container_weight_utilization: Optional[float] = None
+    remaining_volume_m3: float
+    remaining_weight_kg: Optional[float] = None
+    bottleneck: Optional[str] = None
+    bottleneck_label: Optional[str] = None
+    detail: Optional[str] = None
+    causes: List[str] = Field(default_factory=list)
+    short_volume_m3: float = 0
+    short_weight_kg: float = 0
+    short_height_mm: float = 0
+    placed_count: int
+    unplaced_count: int
+
+
+class CompareResponse(BaseModel):
+    recommended: Optional[str] = None
+    options: List[CompareOption]

@@ -1,4 +1,4 @@
-import type { PackRequest, PackResponse, PlacementOut } from "./types";
+import type { CompareResponse, ItemIn, PackRequest, PackResponse, PlacementOut } from "./types";
 
 async function errorDetail(response: Response, fallback: string): Promise<string> {
   const text = await response.text();
@@ -16,6 +16,22 @@ const BASE = import.meta.env.VITE_API_BASE ?? "";
 export async function fetchSample(): Promise<PackRequest> {
   const r = await fetch(`${BASE}/api/sample`);
   if (!r.ok) throw new Error(`sample failed: ${r.status}`);
+  return r.json();
+}
+
+export async function compareContainers(
+  items: ItemIn[],
+  cogBand = 0.15
+): Promise<CompareResponse> {
+  const r = await fetch(`${BASE}/api/pack/compare`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items, cog_band: cogBand }),
+  });
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(`compare failed: ${r.status} ${t}`);
+  }
   return r.json();
 }
 

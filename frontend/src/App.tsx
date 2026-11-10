@@ -4,9 +4,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import type { ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
-import { downloadPackingList, fetchSample, importItems, pack, submitLayout } from "./api";
+import { compareContainers, downloadPackingList, fetchSample, importItems, pack, submitLayout } from "./api";
 import { dropZ, separateOnFloor, snapXY, sourceItem } from "./placement";
-import type { ContainerIn, ItemIn, PackRequest, PackResponse, PlacementOut } from "./types";
+import type {
+  CompareOption,
+  CompareResponse,
+  ContainerIn,
+  ItemIn,
+  PackRequest,
+  PackResponse,
+  PlacementOut,
+} from "./types";
 
 /** mm → scene units (meters-ish, scaled down for camera comfort) */
 const SCALE = 0.001;
@@ -367,6 +375,91 @@ const PRESET_20GP_ITEMS: ItemIn[] = [
   },
 ];
 
+function pct(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return "—";
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function isStandardContainer(container: ContainerIn, option: CompareOption): boolean {
+  return (
+    container.name.trim() === option.code &&
+    container.length === option.length &&
+    container.width === option.width &&
+    container.height === option.height &&
+    (container.max_weight ?? null) === option.max_weight
+  );
+}
+
+function CompareCards({
+  comparison,
+  container,
+  loading,
+  onApply,
+}: {
+  comparison: CompareResponse;
+  container: ContainerIn;
+  loading: boolean;
+  onApply: (option: CompareOption) => void;
+}) {
+  const noneFit = comparison.recommended == null;
+  return (
+    <section className="block compare-block">
+      <div className="block-head">
+        <h2>标准柜对比</h2>
+      </div>
+      <p className="unit-hint">
+        {noneFit
+          ? "三种标准柜都装不下，下面只标出各自还差多少。"
+          : `推荐 ${comparison.recommended}。点击柜型会按该柜重新排箱。`}
+      </p>
+      <div className="compare">
+        {comparison.options.map((option) => {
+          const classes = ["compare-card"];
+          const current = isStandardContainer(container, option);
+          if (comparison.recommended === option.code) classes.push("recommended");
+          if (current) classes.push("current");
+          return (
+            <button
+              key={option.code}
+              type="button"
+              className={classes.join(" ")}
+              onClick={() => onApply(option)}
+              disabled={loading}
+              aria-pressed={current}
+            >
+              <span className="card-title">
+                <strong>{option.code}</strong>
+                {comparison.recommended === option.code && <em className="tag">推荐</em>}
+                {current && <em className="tag">当前</em>}
+              </span>
+              <span className={option.fits ? "ok" : "bad"}>
+                {option.fits
+                  ? "装得下"
+                  : `装不下${option.bottleneck_label ? `，卡了${option.bottleneck_label}` : ""}`}
+              </span>
+              {noneFit ? (
+                <span className="card-detail">{option.detail}</span>
+              ) : (
+                <>
+                  <span>整柜体积利用率 {pct(option.container_volume_utilization)}</span>
+                  <span>重量利用率 {pct(option.container_weight_utilization)}</span>
+                  <span>剩余 {option.remaining_volume_m3.toFixed(3)} m³</span>
+                  <span>
+                    剩余重量 {option.remaining_weight_kg != null ? `${option.remaining_weight_kg} kg` : "—"}
+                  </span>
+                  {!option.fits && option.detail && (
+                    <span className="card-detail">{option.detail}</span>
+                  )}
+                </>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function blankItem(n: number): ItemIn {
   return {
     id: `SKU-${n}`,
@@ -407,6 +500,7 @@ export default function App() {
   const [container, setContainer] = useState<ContainerIn>(PRESET_20GP);
   const [items, setItems] = useState<ItemIn[]>(PRESET_20GP_ITEMS);
   const [result, setResult] = useState<PackResponse | null>(null);
+  const [comparison, setComparison] = useState<CompareResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [manualLayout, setManualLayout] = useState(false);
@@ -456,6 +550,14 @@ export default function App() {
         setContainer(req.container);
         setItems(req.items);
       }
+      try {
+        setComparison(
+          await compareContainers(body.items, body.container.cog_band ?? 0.15)
+        );
+      } catch (compareError) {
+        setComparison(null);
+        setError(compareError instanceof Error ? compareError.message : String(compareError));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -473,6 +575,7 @@ export default function App() {
       setDirty(true);
       setManualLayout(false);
       setResult(null);
+      setComparison(null);
       setSelectedId(null);
     } catch {
       setContainer(PRESET_20GP);
@@ -480,6 +583,7 @@ export default function App() {
       setDirty(true);
       setManualLayout(false);
       setResult(null);
+      setComparison(null);
       setSelectedId(null);
     } finally {
       setLoading(false);
@@ -629,6 +733,7 @@ export default function App() {
       setDirty(true);
       setManualLayout(false);
       setResult(null);
+      setComparison(null);
       setSelectedId(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -637,18 +742,30 @@ export default function App() {
     }
   }, []);
 
+  const applyContainer = useCallback(
+    async (option: CompareOption) => {
+      const next: ContainerIn = {
+        name: option.code,
+        length: option.length,
+        width: option.width,
+        height: option.height,
+        max_weight: option.max_weight,
+        cog_band: container.cog_band ?? 0.15,
+      };
+      const body = requestBody();
+      await runPack({ ...body, container: next });
+    },
+    [container.cog_band, requestBody, runPack]
+  );
+
   const stats = result?.stats;
-  const utilPct = stats ? (stats.volume_utilization * 100).toFixed(1) : null;
+  const utilPct = stats ? pct(stats.volume_utilization) : null;
   const packSize =
     stats?.pack_length_mm != null
       ? `${Math.round(stats.pack_length_mm)} × ${Math.round(stats.pack_width_mm ?? 0)} × ${Math.round(stats.pack_height_mm ?? 0)} mm`
       : null;
   const packSurf =
     stats?.pack_surface_m2 != null ? stats.pack_surface_m2.toFixed(3) : null;
-  const weightPct =
-    stats?.weight_utilization != null
-      ? (stats.weight_utilization * 100).toFixed(1)
-      : null;
 
   return (
     <div className="app">
@@ -765,46 +882,79 @@ export default function App() {
         )}
 
         {stats && (
-          <div className="metrics">
-            <div className="metric">
-              <span>外包装尺寸</span>
-              <strong>{packSize ?? "—"}</strong>
+          <>
+            <div className="metrics metrics-primary">
+              <div className="metric">
+                <span>整柜体积利用率</span>
+                <strong>{pct(stats.container_volume_utilization)}</strong>
+                <small>
+                  {stats.volume_used_m3} / {stats.container_volume_m3 ?? "—"} m³
+                </small>
+              </div>
+              <div className="metric">
+                <span>重量利用率</span>
+                <strong>{pct(stats.container_weight_utilization ?? stats.weight_utilization)}</strong>
+                <small>
+                  {stats.weight_used_kg} kg
+                  {stats.weight_limit_kg != null ? ` / ${stats.weight_limit_kg} kg` : " · 未设限重"}
+                </small>
+              </div>
+              <div className="metric">
+                <span>剩余空间</span>
+                <strong>
+                  {stats.remaining_volume_m3 != null
+                    ? `${stats.remaining_volume_m3.toFixed(3)} m³`
+                    : "—"}
+                </strong>
+              </div>
+              <div className="metric">
+                <span>剩余重量</span>
+                <strong>
+                  {stats.remaining_weight_kg != null ? `${stats.remaining_weight_kg} kg` : "—"}
+                </strong>
+              </div>
+              <div className="metric">
+                <span>未放入</span>
+                <strong>{stats.unplaced_count}</strong>
+                <small>已放入 {stats.placed_count} 件</small>
+              </div>
             </div>
-            <div className="metric">
-              <span>外包装表面积</span>
-              <strong>{packSurf != null ? `${packSurf} m²` : "—"}</strong>
+            {comparison && (
+              <CompareCards
+                comparison={comparison}
+                container={container}
+                loading={loading}
+                onApply={(option) => void applyContainer(option)}
+              />
+            )}
+            <p className="unit-hint">装箱紧密度相对紧凑外包装，不是整柜。</p>
+            <div className="metrics metrics-secondary">
+              <div className="metric">
+                <span>装箱紧密度</span>
+                <strong>{utilPct}</strong>
+                <small>
+                  {stats.volume_used_m3} / {stats.volume_total_m3} m³
+                </small>
+              </div>
+              <div className="metric">
+                <span>外包装尺寸</span>
+                <strong>{packSize ?? "—"}</strong>
+              </div>
+              <div className="metric">
+                <span>外包装表面积</span>
+                <strong>{packSurf != null ? `${packSurf} m²` : "—"}</strong>
+              </div>
+              <div className="metric">
+                <span>重心</span>
+                <strong>
+                  {stats.cog_x_mm != null
+                    ? `${Math.round(stats.cog_x_mm)}, ${Math.round(stats.cog_y_mm ?? 0)}, ${Math.round(stats.cog_z_mm ?? 0)}`
+                    : "—"}
+                </strong>
+                <small>{stats.cog_ok === false ? "偏心，建议调整" : "在允许带内"}</small>
+              </div>
             </div>
-            <div className="metric">
-              <span>装箱紧密度</span>
-              <strong>{utilPct}%</strong>
-              <small>
-                {stats.volume_used_m3} / {stats.volume_total_m3} m³
-              </small>
-            </div>
-            <div className="metric">
-              <span>重心</span>
-              <strong>
-                {stats.cog_x_mm != null
-                  ? `${Math.round(stats.cog_x_mm)}, ${Math.round(stats.cog_y_mm ?? 0)}, ${Math.round(stats.cog_z_mm ?? 0)}`
-                  : "—"}
-              </strong>
-              <small>{stats.cog_ok === false ? "偏心，建议调整" : "在允许带内"}</small>
-            </div>
-
-            <div className="metric">
-              <span>总重量</span>
-              <strong>{stats.weight_used_kg} kg</strong>
-              <small>
-                {weightPct != null ? `限重的 ${weightPct}%` : "未设限重"}
-                {stats.weight_limit_kg != null ? ` / ${stats.weight_limit_kg} kg` : ""}
-              </small>
-            </div>
-            <div className="metric">
-              <span>未放入</span>
-              <strong>{stats.unplaced_count}</strong>
-              <small>已放入 {stats.placed_count} 件</small>
-            </div>
-          </div>
+          </>
         )}
 
         {result && result.unplaced.length > 0 && (

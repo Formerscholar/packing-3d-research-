@@ -13,7 +13,7 @@
 
 **3D 前端**：浏览器 **React Three Fiber + drei + TransformControls**；碰撞先 **AABB**，再考虑 rapier。避免 raw OpenGL / 过早 Unity。
 
-**架构**：后端引擎出 `placements JSON`；前端只渲染与编辑；拖完校验碰撞并重算利用率/重量/顺序；导出 Excel/PDF 装箱单。
+**架构**：后端引擎出 `placements JSON`；前端只渲染与编辑；拖完校验碰撞并重算整柜利用率、剩余空间、重量和顺序。装箱紧密度只相对紧凑外包装。对比 20GP / 40GP / 40HQ 后推荐最小能装下的柜子，装不下时说明卡在体积、高度还是重量。导出 Excel/PDF 装箱单。
 
 **主推栈**：Python（fork/自研 EP）+ FastAPI + React/R3F/drei；备选 Go 引擎或 EasyCargo 仅作展示层。
 
