@@ -135,6 +135,9 @@ def summary_pairs(req: PackRequest, result: PackResponse) -> List[tuple]:
         ("重心是否在带内", "是" if stats.cog_ok else "否"),
         ("已装入件数", stats.placed_count),
         ("未装入件数", stats.unplaced_count),
+        ("整柜体积利用率%", round(stats.container_volume_utilization * 100, 2)),
+        ("剩余体积(m³)", stats.remaining_volume_m3),
+        ("剩余重量(kg)", stats.remaining_weight_kg),
     ]
 
 
@@ -202,15 +205,17 @@ def to_xlsx(req: PackRequest, result: PackResponse) -> bytes:
     summary = wb.active
     summary.title = "装箱汇总"
     bold = Font(bold=True)
-    for key, value in summary_pairs(req, result):
+    pairs = summary_pairs(req, result)
+    for key, value in pairs:
         summary.append([key, value])
-    for row in summary.iter_rows(min_row=1, max_row=8, max_col=1):
+    for row in summary.iter_rows(min_row=1, max_row=len(pairs), max_col=1):
         row[0].font = bold
 
     summary.append([])
+    header_at = summary.max_row + 1
     for rollup_row in _sku_rollup(req, result):
         summary.append(rollup_row)
-    for cell in summary[10]:
+    for cell in summary[header_at]:
         cell.font = bold
 
     detail = wb.create_sheet("装箱明细")
@@ -241,6 +246,8 @@ def _cjk_font() -> str:
         Path(r"C:\Windows\Fonts\msyh.ttf"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
         Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
+        Path("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"),
     ):
         if candidate.is_file():
             return str(candidate)

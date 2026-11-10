@@ -110,6 +110,71 @@ input {
   gap: 8px;
   margin-top: 12px;
 }
+.metrics-primary {
+  grid-template-columns: 1fr 1fr;
+}
+.metrics-primary .metric strong {
+  font-size: 1.15rem;
+}
+.metrics-secondary {
+  margin-top: 8px;
+}
+.metrics-secondary .metric strong {
+  color: #cbd5e1;
+  font-size: 0.95rem;
+}
+.compare {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.panel button.compare-card {
+  width: 100%;
+  background: #1a2330;
+  color: #e7ecf3;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 8px;
+  font-weight: 500;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.panel button.compare-card.recommended {
+  border-color: #38bdf8;
+  box-shadow: inset 0 0 0 1px #38bdf8;
+}
+.panel button.compare-card.current {
+  background: #1c2838;
+}
+.compare-card .card-title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  width: 100%;
+}
+.compare-card .card-title strong {
+  font-size: 0.85rem;
+}
+.compare-card .tag {
+  font-style: normal;
+  color: #7dd3fc;
+  font-size: 0.68rem;
+}
+.compare-card .ok {
+  color: #86efac;
+}
+.compare-card .bad {
+  color: #fca5a5;
+}
+.compare-card .card-detail {
+  color: #fcd34d;
+}
 .metric {
   background: #1a2330;
   border-radius: 8px;

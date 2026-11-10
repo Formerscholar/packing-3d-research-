@@ -9,10 +9,19 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
+from .compare import compare_containers
+from .containers import CATALOG
 from .engine import LayoutError, evaluate_layout, pack
 from .export import to_csv, to_pdf, to_xlsx
 from .import_sku import parse_sku_workbook
-from .models import ContainerIn, ItemIn, PackRequest, PackResponse
+from .models import (
+    CompareRequest,
+    CompareResponse,
+    ContainerIn,
+    ItemIn,
+    PackRequest,
+    PackResponse,
+)
 
 app = FastAPI(
     title="Packing 3D Research API",
@@ -69,7 +78,18 @@ def health():
 
 @app.get("/api/sample")
 def sample() -> PackRequest:
-    return PackRequest(container=ContainerIn(), items=SAMPLE_ITEMS)
+    spec = CATALOG["20GP"]
+    return PackRequest(
+        container=ContainerIn(
+            name=spec.code,
+            length=spec.length,
+            width=spec.width,
+            height=spec.height,
+            max_weight=spec.max_weight,
+            cog_band=spec.cog_band,
+        ),
+        items=SAMPLE_ITEMS,
+    )
 
 
 def _solve(req: PackRequest) -> PackResponse:
@@ -84,6 +104,12 @@ def _solve(req: PackRequest) -> PackResponse:
 @app.post("/api/pack", response_model=PackResponse)
 def pack_endpoint(req: PackRequest) -> PackResponse:
     return pack(req.container, req.items)
+
+
+@app.post("/api/pack/compare", response_model=CompareResponse)
+def compare_endpoint(req: CompareRequest) -> CompareResponse:
+    """Pack the same SKUs into 20GP, 40GP, and 40HQ."""
+    return compare_containers(req.items, cog_band=req.cog_band)
 
 
 @app.post("/api/pack/layout", response_model=PackResponse)
